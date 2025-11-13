@@ -1,0 +1,162 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tableone)  # for pretty summary tables
+library(lme4)
+library(lattice)
+library(performance)
+library(geepack)
+library(tidyr)
+library(mice)
+library(mgcv)
+
+# Read the data
+df_complete <- read.csv("./DataSet2025.csv")
+df <- df_complete %>% filter(!is.na(Female)) #drop participants that did not mark male/female, made up 6/300 participants
+df_mar <- df
+df_mar$stepcount[df_mar$stepcount == 0] <- NA
+```
+
+
+```{r}
+df_wide <- df_mar %>%
+  dplyr::select(id, Group, Act, Age, Female, day, stepcount) %>%
+  pivot_wider(
+    names_from = day,
+    values_from = stepcount,
+    names_prefix = "Day"
+  )
+
+# Use predictive mean matching for continuous data
+imp <- mice(df_wide, m = 40, method = "pmm", seed = 2025)
+
+# Check convergence
+plot(imp)
+```
+```{r}
+pool(imp)
+```
+
+
+```{r}
+df_imp <- complete(imp, 1)
+
+# Reshape back to long format
+df_mar <- df_imp %>%
+  pivot_longer(
+    cols = starts_with("Day"),
+    names_to = "day",
+    names_prefix = "Day",
+    names_transform = list(day = as.integer),
+    values_to = "stepcount"
+  ) %>%
+  arrange(id, day)
+```
+
+```{r}
+ggplot(df_mar, aes(x = day, y = stepcount, group = id)) +
+  # Spaghetti lines for individuals
+  #geom_line(alpha = 0.3, color = "gray") +
+  
+  # Bold lines for group means
+  stat_summary(aes(group = Group, color = Group),
+               fun = mean, geom = "line", size = 1.5) +
+  
+  labs(title = "Spaghetti Plot of Daily Mean Step Counts by Group",
+       x = "Study Day",
+       y = "Step Count") +
+  theme_minimal() +
+  theme(legend.title = element_blank()) +
+  scale_color_brewer(palette = "Dark2")
+```
+
+```{r}
+
+
+week1_steps <- df_mar %>%
+  filter(day <= 7) %>%
+  dplyr::select(id, day, stepcount) %>%
+  pivot_wider(names_from = day,
+              names_prefix = "wk1_step_",
+              values_from = stepcount)
+
+week2_mean <- df_mar %>%
+  filter(day >= 8) %>%
+  group_by(id) %>%
+  summarise(week2_mean = mean(stepcount), .groups = "drop")
+
+baseline <- df_mar %>%
+  group_by(id) %>%
+  slice(1) %>%
+  dplyr::select(id, Group, Age, Female, Act)
+
+analysis_df <- baseline %>%
+  left_join(week1_steps, by = "id") %>%
+  left_join(week2_mean, by = "id")
+
+set.seed(2025)
+n <- nrow(analysis_df)
+train_index <- sample(seq_len(n), size = floor(0.7 * n))
+train_data <- analysis_df[train_index, ]
+val_data   <- analysis_df[-train_index, ]
+
+# 2. Fit OLS model
+ols_model <- lm(
+  week2_mean ~ Group*Act + Age + Female +
+    wk1_step_1 + wk1_step_2 + wk1_step_3 +
+    wk1_step_4 + wk1_step_5 + wk1_step_6 + wk1_step_7,
+  data = train_data
+)
+
+#summary(gam_model)
+summary(ols_model)
+```
+```{r}
+confint(ols_model)
+```
+
+
+```{r}
+plot(ols_model, which = 1)
+
+# Q-Q plot
+plot(ols_model, which = 2)
+# Interpretation: Points should fall roughly on the diagonal line
+library(car)
+vif(ols_model, type = 'predictor')
+```
+```{r}
+pred_val <- predict(ols_model, newdata = val_data)
+
+# Calculate RMSE and R-squared
+rmse <- sqrt(mean((val_data$week2_mean - pred_val)^2, na.rm = TRUE))
+rss <- sum((val_data$week2_mean - pred_val)^2)
+tss <- sum((val_data$week2_mean - mean(val_data$week2_mean))^2)
+r_squared <- 1 - rss / tss
+
+rmse
+r_squared
+```
+```{r}
+pred_val_int <- predict(ols_model, newdata = val_data, interval = "prediction")
+head(pred_val_int)
+```
+```{r}
+ggplot(val_data, aes(x = week2_mean, y = pred_val)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Observed vs. Predicted Week 2 Mean Step Count",
+    x = "Observed Week 2 Mean",
+    y = "Predicted Week 2 Mean"
+  ) +
+  theme_minimal()
+```
+

@@ -1,0 +1,102 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(tableone)  # for pretty summary tables
+library(lme4)
+library(lattice)
+library(performance)
+library(geepack)
+
+# Read the data
+df_complete <- read.csv("./DataSet2025.csv")
+df <- df_complete %>% filter(!is.na(Female)) #drop participants that did not mark male/female, made up 6/300 participants
+df_mar <- df
+df_mar$stepcount[df_mar$stepcount == 0] <- NA
+df_gee <- df_mar[!is.na(df_mar$stepcount), ]
+# Filter for Days 1–7
+#week1_df <- df %>% filter(day <= 7)
+```
+
+```{r}
+df_gee$Group <- as.factor(df_gee$Group)
+df_gee$Act <- as.factor(df_gee$Act)
+df_gee$id <- as.factor(df_gee$id)
+df_gee$dow <- as.factor(df_gee$dow)
+df_gee <- df_gee %>%
+  mutate(
+    day = as.numeric(day),  # ensure day is numeric
+    day1 = day,             # slope before and through Day 7
+    day2 = pmax(0, day - 7) # slope *after* Day 7 (starts at 0, increases only after day 7)
+  )
+# Fit the linear mixed-effects model with random intercept and slope
+#mod <- lmer(stepcount ~ Group * day * Act + Female + (day | id), data = df_mar)
+gee_spline <- geeglm(stepcount ~ Group * (day1 + day2) * Act + Female + Age,
+                     id = id, data = df_gee, corstr = "ar1")
+
+summary(gee_spline)
+#summary(mod)
+
+```
+```{r}
+cc <- coef(summary(gee_spline))
+citab <- with(as.data.frame(cc),
+     cbind(lwr=Estimate-1.96*Std.err,
+           upr=Estimate+1.96*Std.err))
+rownames(citab) <- rownames(cc)
+citab
+```
+
+
+```{r}
+gee_red <- geeglm(stepcount ~ Group * (day1 + day2) + Act + Female + Age,
+                     id = id, data = df_gee, corstr = "ar1")
+
+anova(gee_red, gee_spline)
+```
+
+
+```{r}
+plot(gee_spline, which = 1, main = "Residuals vs Fitted")
+```
+
+```{r}
+qqnorm(residuals(gee_spline), main = "QQ Plot of Residuals")
+qqline(residuals(gee_spline))
+```
+
+```{r}
+df_gee$resid <- resid(gee_spline)
+ggplot(df_gee, aes(x = day, y = resid)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(se = FALSE) +
+  facet_wrap(~ Group) +
+  labs(title = "Residuals Over Time", y = "Residuals")
+```
+```{r}
+library(multcomp)
+
+# Specify linear hypotheses for the Group coefficients
+glht_test <- glht(gee_spline, linfct = c("GroupStandard:day1 = 0", "GroupTailored:day1 = 0", "GroupStandard:day2 = 0", "GroupTailored:day2 = 0"))
+
+# Perform Wald chi-square test (F test)
+summary(glht_test, test = Ftest())
+```
+

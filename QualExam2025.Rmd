@@ -1,0 +1,202 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
+```{r}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(tableone)  # for pretty summary tables
+
+# Read the data
+df_complete <- read.csv("./DataSet2025.csv")
+df <- df_complete %>% filter(!is.na(Female)) #drop participants that did not mark male/female, made up 6/300 participants
+# Filter for Days 1–7
+week1_df <- df %>% filter(day <= 7)
+```
+
+```{r}
+# Count how many zero-step days each participant has
+zero_counts_by_participant <- df %>%
+  group_by(id) %>%
+  summarize(n_zero = sum(stepcount == 0),
+            prop_zero = mean(stepcount == 0)) %>%
+  arrange(desc(prop_zero))
+
+# Visualize: histogram of proportion of zero days
+ggplot(zero_counts_by_participant, aes(x = prop_zero)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  labs(title = "Proportion of Zero-Step Days per Participant", x = "Proportion of Days with 0 Steps", y = "Number of Participants")
+```
+```{r}
+# Proportion of zero-step counts by Group
+zero_by_group <- df %>%
+  group_by(Group) %>%
+  summarize(prop_zero = mean(stepcount == 0))
+
+# Bar plot
+ggplot(zero_by_group, aes(x = Group, y = prop_zero)) +
+  geom_col(fill = "forestgreen") +
+  labs(title = "Proportion of Zero-Step Counts by Group", x = "Intervention Group", y = "Proportion with 0 Steps") +
+  theme_minimal()
+```
+
+```{r}
+df_mcar <- df
+df_mcar$stepcount[df_mcar$stepcount == 0] <- NA
+
+library(naniar)
+library(dplyr)
+
+# Only use complete numeric and categorical variables for the test
+mcar_data <- df_mcar %>% dplyr::select(stepcount, Age, Female)
+mcar_data <- mcar_data[complete.cases(mcar_data), ]  # Optional: remove rows with other missing data
+
+
+mcar_test(mcar_data)
+```
+```{r}
+df_mcar$dow <- factor(df$dow, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+
+# Aggregate total step counts by day of week
+dow_totals <- df_mcar %>%
+  group_by(dow) %>%
+  summarize(total_steps = sum(stepcount, na.rm = TRUE))
+
+# Plot bar chart
+ggplot(dow_totals, aes(x = dow, y = total_steps)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Total Steps by Day of the Week (Across All 14 Days)",
+    x = "Day of the Week",
+    y = "Total Steps"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+mean_steps <- df %>%
+  group_by(id) %>%
+  summarize(mean_stepcount = mean(stepcount, na.rm = TRUE), .groups = "drop")
+
+# Step 2: Extract baseline covariates (one row per participant)
+baseline_df <- df %>%
+  group_by(id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  dplyr::select(id, Group, Age, Female, Act)
+
+# Step 3: Merge mean step count
+baseline_df <- baseline_df %>%
+  left_join(mean_steps, by = "id")
+
+# Convert categorical variables
+baseline_df$Act <- factor(baseline_df$Act, levels = c("not active", "somewhat active", "very active"))
+baseline_df$Female <- factor(baseline_df$Female, levels = c(0,1), labels = c("Male", "Female"))
+
+# Step 4: Create summary table
+vars <- c("Age", "Female", "Act", "mean_stepcount")
+factorVars <- c("Female", "Act")
+table1 <- CreateTableOne(vars = vars, strata = "Group", data = baseline_df, factorVars = factorVars)
+
+# Display the table
+print(table1, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE)
+```
+
+```{r}
+# Average step count by group
+week1_df$stepcount[week1_df$stepcount == 0] <- NA
+week1_summary <- week1_df %>%
+  group_by(Group, Act, id, Age, Female) %>%
+  summarize(mean_steps = mean(stepcount, na.rm = TRUE), .groups = "drop")
+
+# Summarize across participants
+group_summary <- week1_summary %>%
+  group_by(Group, Act) %>%
+  summarize(
+    avg = mean(mean_steps),
+    sd = sd(mean_steps),
+    n = n(),
+    se = sd / sqrt(n)
+  )
+week1_summary
+```
+```{r}
+ggplot(group_summary, aes(x = Act, y = avg, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = avg - se, ymax = avg + se), position = position_dodge(0.9), width = 0.2) +
+  labs(title = "Average Daily Step Count (Days 1–7)",
+       x = "Baseline Activity Level",
+       y = "Mean Step Count") +
+  theme_minimal()
+```
+
+```{r}
+# Plot: Individual step count trajectories with bold group means
+df_mar <- df
+df_mar$stepcount[df_mar$stepcount == 0] <- NA
+ggplot(df_mar, aes(x = day, y = stepcount, group = id)) +
+  # Spaghetti lines for individuals
+  #geom_line(alpha = 0.3, color = "gray") +
+  
+  # Bold lines for group means
+  stat_summary(aes(group = Group, color = Group),
+               fun = mean, geom = "line", size = 1.5) +
+  
+  labs(title = "Spaghetti Plot of Daily Mean Step Counts by Group",
+       x = "Study Day",
+       y = "Step Count") +
+  theme_minimal() +
+  theme(legend.title = element_blank()) +
+  scale_color_brewer(palette = "Dark2")
+```
+
+
+```{r}
+model <- lm(mean_steps ~ Group * Act + Age + Female, data = week1_summary)
+summary(model)
+```
+
+```{r}
+plot(model, which = 1)
+
+# Q-Q plot
+plot(model, which = 2)
+# Interpretation: Points should fall roughly on the diagonal line
+library(car)
+vif(model, type = 'predictor')
+```
+```{r}
+library(multcomp)
+
+# Specify linear hypotheses for the Group coefficients
+glht_test <- glht(model, linfct = c("GroupStandard = 0", "GroupTailored = 0"))
+
+# Perform Wald chi-square test (F test)
+summary(glht_test, test = Ftest())
+#anova(model)
+
+confint(model, level = 0.95)
+
+```
+```{r}
+model_red <- lm(mean_steps ~ Group + Act + Age + Female, data = week1_summary)
+
+anova(model_red, model)
+```
+
